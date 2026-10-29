@@ -1,0 +1,58 @@
+{
+  "name": "copykat-studio",
+  "version": "0.6.1",
+  "description": "CopyKat Studio by Oso: copy the style of any reel, story, post or TikTok with your own photos and texts — plus a video downloader, halftone paper collages and 51 film looks. Runs locally with your own ChatGPT, Claude or API key.",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "PaulVentseck / usepaul",
+  "homepage": "https://github.com/PaulVentseck-lib/copykat-studio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PaulVentseck-lib/copykat-studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PaulVentseck-lib/copykat-studio/issues"
+  },
+  "bin": {
+    "copykat": "bin/copykat.js",
+    "copykat-studio": "bin/copykat.js"
+  },
+  "files": [
+    "bin/",
+    "oso.png",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node -e \"for (const f of ['LICENSE','NOTICE']) require('fs').copyFileSync('../'+f, f)\""
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "reels",
+    "instagram",
+    "tiktok",
+    "stories",
+    "shorts",
+    "youtube",
+    "video",
+    "video-editing",
+    "video-template",
+    "motion-graphics",
+    "social-media",
+    "content-creation",
+    "ai",
+    "chatgpt",
+    "claude",
+    "yt-dlp",
+    "video-downloader",
+    "youtube-downloader",
+    "collage",
+    "halftone",
+    "ffmpeg",
+    "hyperframes",
+    "pixel-art",
+    "cli"
+  ]
+}

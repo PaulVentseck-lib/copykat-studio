@@ -1,0 +1,254 @@
+# CopyKat Studio by Oso — compile and publish. THIS FILE LIVES IN THE PUBLIC REPOSITORY (copied there from the
+# private one, publico/compilar.yml, by the private repo's «Enviar al público» workflow).
+#
+# It runs here, in the public repo, so GitHub Actions minutes are free. The source code is NOT in this repo: the
+# job downloads it from the private repository (secret FUENTE_TOKEN, read-only) inside GitHub's temporary
+# machine, compiles it with Cython (no sources inside the packages), checks that nothing private leaks, and
+# publishes. Nothing of the code is saved here, and the logs don't print it.
+#
+# Starts when the private repo pushes a tag v1.2.3 here.
+# Secrets of THIS repo: FUENTE_REPO (owner/name of the private repo — a secret so it never shows up here or in the
+# logs), FUENTE_TOKEN (a fine-grained token of its owner, Contents: read-only, on that repo) and NPM_TOKEN (npm
+# granular token, read and write). PyPI: trusted publishing, no token.
+name: Compilar y publicar
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  FUENTE: ${{ secrets.FUENTE_REPO }}
+
+jobs:
+  ruedas:
+    name: Compilar (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15-intel, macos-14]
+    steps:
+      - uses: actions/setup-python@v6        # macOS runners have python3 but no «python»
+        with:
+          python-version: "3.12"
+      - name: Secretos en su sitio
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.FUENTE_TOKEN }}
+        run: |
+          [ -n "$FUENTE" ] || { echo "::error::Falta el SECRETO FUENTE_REPO en este repositorio (Settings → Secrets and variables → Actions): el nombre del repositorio privado, dueño/nombre."; exit 1; }
+          [ -n "$TOKEN" ] || { echo "::error::Falta el SECRETO FUENTE_TOKEN en este repositorio: el token de sólo lectura del repositorio privado."; exit 1; }
+      - name: Código del repositorio privado (sólo en esta máquina temporal)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.FUENTE }}
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.FUENTE_TOKEN }}
+          path: fuente
+          persist-credentials: false
+      - name: La versión del paquete es la de la etiqueta
+        shell: python
+        run: |
+          import os, re, pathlib
+          v = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          for f, pat, rep in (("fuente/pyproject.toml", r'^version = ".*"', f'version = "{v}"'),
+                              ("fuente/copykat/__init__.py", r'^__version__ = ".*"', f'__version__ = "{v}"')):
+              p = pathlib.Path(f)
+              p.write_text(re.sub(pat, rep, p.read_text(encoding="utf-8"), count=1, flags=re.M), encoding="utf-8")
+          print("versión", v)
+      - uses: pypa/cibuildwheel@v2.21.3
+        with:
+          package-dir: fuente
+          output-dir: wheelhouse
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "*-musllinux_* *-win32 *_i686"
+          # Pillow, numpy and pydantic-core no longer ship wheels for CentOS 7 (manylinux2014): test would try to compile them
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_ENVIRONMENT: COPYKAT_COMPILAR=1
+          CIBW_ENVIRONMENT_WINDOWS: COPYKAT_COMPILAR=1
+          CIBW_BUILD_VERBOSITY: 0
+          CIBW_TEST_COMMAND: python -m copykat --help
+      - name: Ningún código fuente ni dato privado dentro
+        shell: python
+        run: |
+          import glob, os, re, zipfile
+          permitidos = {"copykat/__init__.py", "copykat/__main__.py", "copykat/schema.py",
+                        "copykat/mcp_server.py", "copykat/mcp_agente.py"}
+          dueno = re.escape(os.environ["FUENTE"].split("/")[0]).encode()
+          prohibido = re.compile(rb"[A-Za-z0-9._%+-]+@(gmail|hotmail|outlook|yahoo|icloud)\.|/home/|/Users/|"
+                                 rb"[A-Z]:\\Users|" + dueno, re.I)
+          ruedas = glob.glob("wheelhouse/*.whl")
+          assert ruedas, "no ha salido ningún paquete"
+          for whl in ruedas:
+              z = zipfile.ZipFile(whl)
+              sobra = [n for n in z.namelist() if n.endswith((".py", ".c", ".h", ".pyx", ".cpp")) and n not in permitidos]
+              assert not sobra, ("código fuente dentro", whl, sobra)
+              for n in z.namelist():
+                  if n.endswith("/LICENSE"):
+                      continue
+                  m = prohibido.search(z.read(n))
+                  assert not m, ("dato privado dentro", whl, n, m.group(0))
+          print("ok:", len(ruedas), "paquetes limpios")
+      - name: Borrar el código de la máquina
+        if: always()
+        shell: bash
+        run: rm -rf fuente
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ruedas-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  windows:
+    name: Instalador de Windows
+    needs: ruedas
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Lanzador e instalador del repositorio privado (sólo en esta máquina temporal)
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.FUENTE }}
+          ref: ${{ github.ref_name }}
+          token: ${{ secrets.FUENTE_TOKEN }}
+          path: fuente
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ruedas-windows-latest
+          path: wheelhouse
+      - name: CopyKat compilado y PyInstaller
+        run: |
+          rueda=$(ls wheelhouse/copykat_studio-*-cp312-cp312-win_amd64.whl)
+          python -m pip install --upgrade pip
+          python -m pip install "${rueda}[all]" pyinstaller
+      - name: El .exe
+        env:
+          COPYKAT_FUENTE: fuente/copykat
+        run: pyinstaller fuente/windows/copykat.spec --noconfirm --distpath dist --workpath build
+      - name: ffmpeg y Node dentro (no hace falta instalar nada más)
+        run: |
+          app="dist/CopyKat Studio"
+          curl -fsSL -o ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+          7z x -y -offmpeg ffmpeg.zip > /dev/null
+          mkdir -p "$app/bin" "$app/licencias"
+          cp ffmpeg/*/bin/ffmpeg.exe ffmpeg/*/bin/ffprobe.exe "$app/bin/"
+          cp ffmpeg/*/LICENSE.txt "$app/licencias/ffmpeg-LICENSE.txt"
+          v=$(curl -fsSL https://nodejs.org/dist/index.json | python -c "import json,sys; print(next(r['version'] for r in json.load(sys.stdin) if r['lts']))")
+          echo "Node $v"
+          curl -fsSL -o node.zip "https://nodejs.org/dist/$v/node-$v-win-x64.zip"
+          7z x -y -onode node.zip > /dev/null
+          mv node/node-$v-win-x64 "$app/node"
+          cp "$app/node/LICENSE" "$app/licencias/node-LICENSE.txt"
+      - name: Prueba del .exe
+        run: |
+          app="dist/CopyKat Studio"
+          "$app/CopyKat Studio.exe" -m copykat --help > /dev/null
+          PATH="$PWD/$app/bin:$PATH" ffmpeg -hide_banner -encoders | grep -q libx264
+          ("$app/CopyKat Studio.exe" > estudio.log 2>&1 &)
+          for i in $(seq 1 60); do curl -fs http://127.0.0.1:8080/api/estado && break; sleep 2; done
+          curl -fs http://127.0.0.1:8080/api/estado | grep -q '"descargas": true' || { cat estudio.log; exit 1; }
+          taskkill //F //IM "CopyKat Studio.exe" || true
+      - name: Ningún código fuente ni dato privado dentro
+        shell: python
+        run: |
+          import os, re, pathlib
+          dueno = re.escape(os.environ["FUENTE"].split("/")[0]).encode()
+          prohibido = re.compile(rb"[A-Za-z0-9._%+-]+@(gmail|hotmail|outlook|yahoo|icloud)\.|/home/user|" + dueno, re.I)
+          permitidos = {"__init__.py", "__main__.py", "schema.py", "mcp_server.py", "mcp_agente.py"}
+          pkg = next(pathlib.Path("dist").rglob("copykat/__init__.py")).parent
+          for f in pkg.rglob("*"):
+              if f.is_file():
+                  assert not (f.suffix in (".py", ".c", ".pyx") and f.name not in permitidos), ("código fuente", f)
+                  m = prohibido.search(f.read_bytes())
+                  assert not m, ("dato privado", f, m.group(0))
+          print("ok:", pkg)
+      - name: Instalador
+        # PowerShell: Git Bash mangles /D options that carry a path
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $v = $env:GITHUB_REF_NAME.TrimStart('v')
+          & $iscc "/DVersion=$v" "/DSource=$PWD\dist\CopyKat Studio" "fuente\windows\instalador.iss"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force instalador | Out-Null
+          Move-Item fuente\windows\Output\*.exe instalador\
+          Get-ChildItem instalador
+      - name: Borrar el código de la máquina
+        if: always()
+        run: rm -rf fuente
+      - uses: actions/upload-artifact@v4
+        with:
+          name: instalador-windows
+          path: instalador/*.exe
+
+  pypi:
+    name: Publicar en PyPI
+    needs: ruedas
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write          # PyPI trusted publishing: GitHub proves it's this workflow, no token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ruedas-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  npm:
+    name: Publicar en npm
+    needs: pypi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Versión de la etiqueta
+        working-directory: npm
+        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}" --allow-same-version
+      - working-directory: npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  release:
+    name: Release con los paquetes
+    needs: [pypi, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ruedas-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: instalador-windows
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          {
+            echo "**Windows:** download \`CopyKat-Studio-$v-Setup.exe\`, run it, and open CopyKat Studio from the Start menu or the desktop. Everything is included (Python, ffmpeg, Node). If Windows SmartScreen warns you, click «More info» → «Run anyway»."
+            echo
+            echo "**Mac, Linux or any system:** \`npx copykat-studio\` or \`pipx install \"copykat-studio[all]\"\`."
+          } > notas.md
+          gh release create "${GITHUB_REF_NAME}" dist/*.exe dist/*.whl --repo "${GITHUB_REPOSITORY}" \
+            --title "CopyKat Studio by Oso ${GITHUB_REF_NAME}" --notes-file notas.md
